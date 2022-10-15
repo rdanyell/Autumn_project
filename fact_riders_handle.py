@@ -27,12 +27,12 @@ class FactRiders:
             in_cursor.execute("""SELECT driver_license, first_name, last_name, 
             middle_name, driver_valid_to, card_num, update_dt, birth_dt FROM taxi.main.drivers""")
             rows = in_cursor.fetchall()
-            # print("Query executed successfully")
             for row in rows:
                out_cursor.execute("""INSERT INTO dwh.dwh_barnaul.dim_drivers (driver_license_num, 
                first_name, last_name, middle_name, driver_license_dt, card_num, start_dt, birth_dt) VALUES 
                ('%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s')""" % 
                (row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7]))
+            print("Query executed successfully")
         except Exception as err:
             print(err)
         
