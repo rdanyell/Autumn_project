@@ -1,42 +1,66 @@
+from numpy import empty
 import pandas as pd
-# import SQLAlchemy
+import sqlalchemy
 from Connectors import PosrtgresConnector as PG_C
-from info import db_out_params, create_fact_rides_table, db_in_params
+from info import db_out_params, create_tables, db_in_params
+import pandas.io.sql as psql
+from datetime import datetime
 
 class FactRiders:
-    def first_start():
-        pstgrs_cnnctn = PG_C(db_out_params)
-        pstgrs_cnnctn.connection.autocommit = True
-        cursor = pstgrs_cnnctn.connection.cursor()
-        try:
-            cursor.execute(create_fact_rides_table)
-            print("Query executed successfully")
-        except Exception as err:
-            print(err)
-        pstgrs_cnnctn.connection.close()
 
-    def first_fill_from_in():
-        in_cnnctn = PG_C(db_in_params)
-        in_cnnctn.connection.autocommit = True
-        out_cnnctn = PG_C(db_out_params)
-        out_cnnctn.connection.autocommit = True
+    #создаем необходимые таблицы в целевом хранилище данных
+    def create_tables(): 
+        engine_out = sqlalchemy.create_engine("postgresql://dwh_barnaul:dwh_barnaul_YHQdvxan@de-edu-db.chronosavant.ru:5432/dwh")
+        result = engine_out.execute(create_tables)
 
-        in_cursor = in_cnnctn.connection.cursor()
-        out_cursor = out_cnnctn.connection.cursor()
-        try:
-            in_cursor.execute("""SELECT driver_license, first_name, last_name, 
-            middle_name, driver_valid_to, card_num, update_dt, birth_dt FROM taxi.main.drivers""")
-            rows = in_cursor.fetchall()
-            # print("Query executed successfully")
-            for row in rows:
-               out_cursor.execute("""INSERT INTO dwh.dwh_barnaul.dim_drivers (driver_license_num, 
-               first_name, last_name, middle_name, driver_license_dt, card_num, start_dt, birth_dt) VALUES 
-               ('%s', '%s', '%s', '%s', '%s', '%s', '%s', '%s')""" % 
-               (row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7]))
-        except Exception as err:
-            print(err)
+
+    #загрузка данных из источника, проверка на новые строки, изменения 
+    # (добавляет измененные строки, но не заполняет поле end_dt у предыдущего значения, при этом отдельно такой запрос в базе изменения вносит), 
+    # также на удаленные строки (строки находит, но не ставит флаги)
+    def increment_load_new_data(engine_in, engine_out, source_upd_df, tbl_name, key, pk, target):
+    
         
-        in_cnnctn.connection.close()
-        out_cnnctn.connection.close()
-        # df = pd.read_sql('select * from riders', con=pstgrs_cnnctn)
-         
+        target.apply(tuple, 1)
+        source_upd_df.apply(tuple,1).isin(target.apply(tuple,1))
+        changes = source_upd_df[~source_upd_df.apply(tuple,1).isin(target.apply(tuple,1))]
+        inserts = changes[~changes[key].isin(target[key])]
+        inserts.to_sql(tbl_name, engine_out, if_exists='append', index=False)
+        modified = changes[changes[key].isin(target[key])]
+        if modified is not empty:
+            # print('This lines are modified')
+            # print(modified.head())
+            # for i in range(len(modified)):
+            #     date = str(modified['start_dt'].loc[i])
+            #     line = modified[key].loc[i]
+            #     statement = "WITH subquery AS (SELECT * FROM " + tbl_name +" WHERE " + key + " = '" + line + "') UPDATE " + tbl_name + " SET end_dt = '" + date + "' WHERE " + pk  +" = (SELECT MAX(subquery."+ pk+") FROM subquery);"
+            #     print(statement)
+            #     engine_out.execute(statement)    
+            #     print('statement executed')
+            modified.to_sql(tbl_name, engine_out, if_exists='append', index=False)
+        # deleted = target[~target.apply(tuple,1).isin(source_upd_df.apply(tuple,1))]
+        # print('This lines are deleted from source')
+        # print(deleted.head())   
+
+    def load_csv(engine_in, engine_out):
+        custom_date_parser = lambda x: datetime.strptime(x, "%d %m %Y %H:%M:%S")
+        colnames_payments=['datetime', 'card_num', 'transaction_amt']
+        
+        payments_df = pd.read_csv('total_payments.csv', sep ='\t', names=colnames_payments, header=None,  
+            date_parser=custom_date_parser)
+        format1 ="%d.%m.%Y %H:%M:%S"
+        format2 = "%Y-%m-%d %H:%M:%S"
+        payments_df['datetime'] = payments_df['datetime'].apply(lambda x: datetime.strptime(x, format1).strftime(format2)) 
+        payments_df['transaction_id'] = payments_df.index
+        payments_df = payments_df[['transaction_id', 'card_num', 'transaction_amt', 'datetime']]
+        payments_df = payments_df.rename(columns={'datetime': 'transaction_dt'})
+     
+        # print(payments_df.head(3))
+        source_pay = payments_df 
+        pay_tbl_name = "fact_payments"
+        pay_key = "transaction_id"
+        pay_pk = "transaction_id"
+        pay_target = pd.read_sql('Select transaction_id, card_num, transaction_amt, transaction_dt \
+            FROM dwh.dwh_barnaul."fact_payments"', engine_out)
+
+        FactRiders.increment_load_new_data(engine_in, engine_out, source_upd_df = source_pay,  \
+            tbl_name = pay_tbl_name, key = pay_key, pk = pay_pk, target = pay_target)
